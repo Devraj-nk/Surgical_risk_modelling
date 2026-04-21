@@ -22,11 +22,13 @@ const els = {
 let heartMaterials = [];
 
 let liveSim = null;
+let patientDeadLatched = false;
+let deathMonitorExtremeSince = null;
 
 // Served from ui/static/
 // const GLB_URL = "a_heart_model_with_arteries_clean.glb";
 const GLB_URL = "realistic_human_heart.glb";
-
+const ML_Model = "baseline_metrics.json";
 function setStatus(s) {
   els.status.textContent = s;
 }
@@ -159,7 +161,7 @@ const INPUTS = [
   },
   {
     key: "oxygen",
-    label: "Oxygen cylinder supply (0–100%)",
+    label: "Oxygen supply / realtime value (0–100%)",
     help: "Lower -> oxygenation worsens.",
     min: 0,
     max: 100,
@@ -168,8 +170,8 @@ const INPUTS = [
   },
   {
     key: "blood_loss",
-    label: "Blood loss (mL)",
-    help: "Higher -> BP drops; HR compensates. >2500–3000 mL can decompensate.",
+    label: "Blood loss (mL per 10s)",
+    help: "During live run, this amount is lost every 10 seconds (cumulative loss drives vitals and pallor).",
     min: 0,
     max: 4000,
     step: 25,
@@ -180,10 +182,75 @@ const INPUTS = [
 const SIM_DURATION_S = 180; // show 1–3 min edge behaviors
 const SIM_DT_S = 1;
 
+const BLEED_INTERVAL_S = 10;
+
+function accumulatedBloodLossMl(bloodLossPer10sMl, tSeconds) {
+  const per10s = clamp(Number(bloodLossPer10sMl ?? 0), 0, 4000);
+  const steps = Math.floor(Math.max(0, Number(tSeconds) || 0) / BLEED_INTERVAL_S);
+  return clamp(per10s * steps, 0, 4000);
+}
+
+function effectiveInputsAtTime(baseInputs, tSeconds) {
+  return {
+    anesthesia: baseInputs?.anesthesia ?? 0,
+    oxygen: baseInputs?.oxygen ?? 100,
+    // UI input is interpreted as "mL lost per 10 seconds" during live simulation.
+    blood_loss: accumulatedBloodLossMl(baseInputs?.blood_loss ?? 0, tSeconds),
+  };
+}
+
 function logistic01(x) {
   const v = Number(x);
   if (!Number.isFinite(v)) return 0;
   return 1 / (1 + Math.exp(-v));
+}
+
+function riskFromInputRanges({ anesthesia, oxygen, blood_loss }) {
+  const aPct = clamp(Number(anesthesia ?? 0), 0, 100);
+  const oPct = clamp(Number(oxygen ?? 100), 0, 100);
+  const bMl = clamp(Number(blood_loss ?? 0), 0, 4000);
+
+  // Range-wise (step) risk components.
+  // Goal: make "high" ranges (e.g., anesthesia >= 80%) materially increase risk.
+  let aRisk = 0.05;
+  if (aPct >= 99) aRisk = 0.92;
+  else if (aPct >= 90) aRisk = 0.84;
+  else if (aPct >= 80) aRisk = 0.70;
+  else if (aPct >= 60) aRisk = 0.42;
+  else if (aPct >= 30) aRisk = 0.18;
+
+  // Oxygen is inverse: lower oxygen => higher risk.
+  let oRisk = 0.05;
+  if (oPct <= 0.1) oRisk = 1.0;
+  else if (oPct < 40) oRisk = 0.92;
+  else if (oPct < 60) oRisk = 0.75;
+  else if (oPct < 80) oRisk = 0.52;
+  else if (oPct < 90) oRisk = 0.30;
+  else if (oPct < 95) oRisk = 0.14;
+
+  let bRisk = 0.05;
+  if (bMl >= 3400) bRisk = 0.95;
+  else if (bMl >= 2800) bRisk = 0.85;
+  else if (bMl >= 2200) bRisk = 0.68;
+  else if (bMl >= 1500) bRisk = 0.45;
+  else if (bMl >= 750) bRisk = 0.22;
+
+  // Combine with emphasis on the worst component, but allow compounding.
+  const worst = Math.max(aRisk, oRisk, bRisk);
+  const weighted = 0.42 * aRisk + 0.36 * oRisk + 0.22 * bRisk;
+  let risk01 = clamp(0.78 * worst + 0.22 * weighted, 0, 1);
+
+  // Compounding when multiple dimensions are high.
+  const hi = (x) => x >= 0.65;
+  const mid = (x) => x >= 0.45;
+  const countHi = (hi(aRisk) ? 1 : 0) + (hi(oRisk) ? 1 : 0) + (hi(bRisk) ? 1 : 0);
+  const countMid = (mid(aRisk) ? 1 : 0) + (mid(oRisk) ? 1 : 0) + (mid(bRisk) ? 1 : 0);
+  if (countHi >= 2) risk01 = clamp(risk01 + 0.12, 0, 1);
+  else if (countMid >= 2) risk01 = clamp(risk01 + 0.06, 0, 1);
+
+  // Preserve the earlier special-case semantics.
+  if (aPct >= 99.9) return 10;
+  return risk01;
 }
 
 function computeVitalsAtTime({ anesthesia, oxygen, blood_loss }, tSeconds, options = {}) {
@@ -299,14 +366,12 @@ function computeVitalsAtTime({ anesthesia, oxygen, blood_loss }, tSeconds, optio
   map = clamp(map, 15, 130);
   co = clamp(co, 0.6, 10);
 
-  const spo2 = clamp(0.98 - 0.55 * (1 - o) - 0.14 * (bloodMl / 4000), 0.35, 1.0);
-  const riskFromSpo2 = clamp((0.94 - spo2) / 0.44, 0, 1);
-  const riskFromMap = clamp((65 - map) / 45, 0, 1);
-  const risk = clamp(Math.max(riskFromSpo2, riskFromMap) + 0.15 * a, 0, 1);
+  let spo2 = clamp(0.98 - 0.55 * (1 - o) - 0.14 * (bloodMl / 4000), 0.35, 1.0);
+  let risk = riskFromInputRanges({ anesthesia, oxygen, blood_loss: bloodMl });
 
   // Death / flatline for the extreme inputs only.
   // Requirement: after ~20–30s, heart stops and graphs go to nil.
-  const deathAfterS = 25;
+  const deathAfterS = a >= 0.999 ? 20 : 25;
   const extremeElapsedSeconds =
     options && Number.isFinite(options.extremeElapsedSeconds) ? Math.max(0, options.extremeElapsedSeconds) : null;
   const dead = extreme && (extremeElapsedSeconds != null ? extremeElapsedSeconds >= deathAfterS : t >= deathAfterS);
@@ -317,7 +382,7 @@ function computeVitalsAtTime({ anesthesia, oxygen, blood_loss }, tSeconds, optio
     spo2 = 0;
   }
 
-  return { hr, map, co, spo2, risk: dead ? 1 : risk, dead };
+  return { hr, map, co, spo2, risk: dead ? Math.max(1, risk) : risk, dead };
 }
 
 function buildForm() {
@@ -350,6 +415,8 @@ function tryGetInputs() {
 
 function resetInputs() {
   stopLiveSimulation();
+  patientDeadLatched = false;
+  deathMonitorExtremeSince = null;
   for (const cfg of INPUTS) {
     const input = els.form.querySelector(`input[data-key="${cfg.key}"]`);
     if (input) input.value = String(cfg.defaultValue ?? "");
@@ -366,16 +433,20 @@ function startLiveSimulation(inputs) {
   stopLiveSimulation();
   clearCharts();
 
+  patientDeadLatched = false;
+  deathMonitorExtremeSince = null;
+
   liveSim = {
     inputs,
     startedAt: null,
     lastSampleAt: 0,
     sampleDt: 0.2,
-    windowSeconds: 10,
+    windowSeconds: 12,
     maxSeconds: SIM_DURATION_S,
     cycleIndex: null,
     extremeSince: null,
     deadLatched: false,
+    lastBloodLossMl: 0,
     t: [],
     hr: [],
     map: [],
@@ -392,6 +463,43 @@ function stopLiveSimulation() {
   if (!liveSim) return;
   liveSim = null;
   setStatus("Ready");
+}
+
+function _isExtremeInputs(inputs) {
+  const a = clamp((inputs?.anesthesia ?? 0) / 100, 0, 1);
+  const o = clamp((inputs?.oxygen ?? 100) / 100, 0, 1);
+  const bMl = clamp(Number(inputs?.blood_loss ?? 0), 0, 4000);
+  return o <= 0.01 || bMl >= 2800 || a >= 0.8;
+}
+
+function _deathDelaySeconds(inputs) {
+  const a = clamp((inputs?.anesthesia ?? 0) / 100, 0, 1);
+  return a >= 0.999 ? 20 : 25;
+}
+
+function updateDeathMonitor(nowSeconds) {
+  if (patientDeadLatched) return;
+  const inputs = tryGetInputs();
+  if (!inputs) return;
+
+  const tSim = liveSim?.startedAt == null ? 0 : Math.max(0, nowSeconds - liveSim.startedAt);
+  const eff = liveSim ? effectiveInputsAtTime(inputs, tSim) : inputs;
+
+  const extremeNow = _isExtremeInputs(eff);
+  if (!extremeNow) {
+    deathMonitorExtremeSince = null;
+    return;
+  }
+
+  if (deathMonitorExtremeSince == null) {
+    deathMonitorExtremeSince = nowSeconds;
+  }
+
+  const delay = _deathDelaySeconds(inputs);
+  if (nowSeconds - deathMonitorExtremeSince >= delay) {
+    patientDeadLatched = true;
+    setStatus("Patient dead");
+  }
 }
 
 function pushSample(buf, t, v, maxPoints) {
@@ -432,8 +540,8 @@ function updateLiveSimulation(nowSeconds) {
   // Determine if we're currently in an extreme condition.
   const aNow = clamp((sim.inputs.anesthesia ?? 0) / 100, 0, 1);
   const oNow = clamp((sim.inputs.oxygen ?? 100) / 100, 0, 1);
-  const bNowMl = clamp(Number(sim.inputs.blood_loss ?? 0), 0, 4000);
-  const extremeNow = oNow <= 0.01 || bNowMl >= 2800 || aNow >= 0.8;
+  const bloodEffNowMl = accumulatedBloodLossMl(sim.inputs.blood_loss ?? 0, tSim);
+  const extremeNow = oNow <= 0.01 || bloodEffNowMl >= 2800 || aNow >= 0.8;
 
   // Death happens after ~25s of being in an extreme condition.
   // Once dead, keep dead even if inputs later change.
@@ -463,11 +571,16 @@ function updateLiveSimulation(nowSeconds) {
   while (nowSeconds - sim.lastSampleAt >= sim.sampleDt) {
     const tS = Math.max(0, sim.lastSampleAt - sim.startedAt);
     const extremeElapsedSeconds = sim.extremeSince == null ? null : tS - sim.extremeSince;
-    const v = computeVitalsAtTime(sim.inputs, tS, { extremeElapsedSeconds });
+    const eff = effectiveInputsAtTime(sim.inputs, tS);
+    const v = computeVitalsAtTime(eff, tS, { extremeElapsedSeconds });
+    sim.lastBloodLossMl = eff.blood_loss;
     pushSample(sim, tS, v, maxPoints);
     sim.lastSampleAt += sim.sampleDt;
 
-    if (v.dead) sim.deadLatched = true;
+    if (v.dead) {
+      sim.deadLatched = true;
+      patientDeadLatched = true;
+    }
   }
 
   const n = sim.t.length;
@@ -475,6 +588,7 @@ function updateLiveSimulation(nowSeconds) {
     const hr = sim.hr[n - 1];
     const map = sim.map[n - 1];
     const co = sim.co[n - 1];
+    const bloodLoss = sim.lastBloodLossMl ?? 0;
     const spo2 = sim.spo2[n - 1];
     const risk = sim.risk[n - 1];
 
@@ -486,7 +600,8 @@ function updateLiveSimulation(nowSeconds) {
         inputs: {
           anesthesia_percent: sim.inputs.anesthesia,
           oxygen_percent: sim.inputs.oxygen,
-          blood_loss_ml: sim.inputs.blood_loss,
+          blood_loss_ml_per_10s: sim.inputs.blood_loss,
+          cumulative_blood_loss_ml: bloodLoss,
         },
         derived_vitals: {
           at_time_seconds: sim.t[n - 1],
@@ -502,7 +617,13 @@ function updateLiveSimulation(nowSeconds) {
       2
     );
 
-    if (sim.dead || sim.deadLatched) setStatus("Patient dead");
+    // Heart tint driven directly by oxygen + *cumulative* blood loss rules.
+    applyHeartColor(heartColorFromInputs({ oxygen: sim.inputs.oxygen, blood_loss: bloodLoss }));
+
+    if (sim.dead || sim.deadLatched) {
+      patientDeadLatched = true;
+      setStatus("Patient dead");
+    }
   }
 
   // Render ECG-like sweep: show only current cycle segment up to the cursor.
@@ -543,7 +664,8 @@ function heartColorFromInputs({ oxygen, blood_loss }) {
   const o = clamp((oxygen ?? 100) / 100, 0, 1);
   const b = clamp((blood_loss ?? 0) / 2000, 0, 1);
 
-  const baseRed = new THREE.Color("#ff2d2d");
+  // Default heart color: reddish-brown.
+  const baseRed = new THREE.Color("#7a2c1a");
   const paleRed = new THREE.Color("#ffd6d6");
   const blueTint = new THREE.Color("#4da3ff");
 
@@ -577,14 +699,28 @@ function simulateOnce() {
   const spo2 = series.spo2[iEnd];
   const risk = series.risk[iEnd];
 
+  // Determine if the end-state is dead by re-evaluating at that time.
+  const tEnd = series.t[iEnd] ?? SIM_DURATION_S;
+  const effEnd = effectiveInputsAtTime({ anesthesia, oxygen, blood_loss }, tEnd);
+  const bloodLoss = effEnd.blood_loss;
+  const vEnd = computeVitalsAtTime(effEnd, tEnd, {
+    extremeElapsedSeconds: series.t[iEnd] ?? SIM_DURATION_S,
+  });
+  if (vEnd.dead) patientDeadLatched = true;
+
   // HeartbeatPulse call site: drive beat rate from simulated HR (end-state).
-  heartbeatPulse?.setBpm(hr);
+  heartbeatPulse?.setBpm(vEnd.dead ? 0 : hr);
 
   els.driving.textContent = risk.toFixed(3);
   els.p.textContent = `HR ${hr.toFixed(0)} bpm, MAP ${map.toFixed(0)} mmHg, CO ${co.toFixed(2)} L/min`;
   els.all.textContent = JSON.stringify(
     {
-      inputs: { anesthesia_percent: anesthesia, oxygen_percent: oxygen, blood_loss_ml: blood_loss },
+      inputs: {
+        anesthesia_percent: anesthesia,
+        oxygen_percent: oxygen,
+        blood_loss_ml_per_10s: blood_loss,
+        cumulative_blood_loss_ml: bloodLoss,
+      },
       derived_vitals: {
         at_time_seconds: series.t[iEnd] ?? SIM_DURATION_S,
         heart_rate_bpm: hr,
@@ -600,7 +736,7 @@ function simulateOnce() {
   );
 
   // Heart tint driven directly by oxygen + blood loss rules.
-  applyHeartColor(heartColorFromInputs({ oxygen, blood_loss }));
+  applyHeartColor(heartColorFromInputs({ oxygen, blood_loss: bloodLoss }));
 
   drawChart(els.chartHr, series.t, series.hr, { units: "bpm", line: "#ff7a7a" });
   drawChart(els.chartBp, series.t, series.map, { units: "mmHg", line: "#ff7a7a" });
@@ -627,7 +763,8 @@ function simulateSeries({ anesthesia, oxygen, blood_loss }) {
   const risk = [];
 
   for (let s = 0; s <= SIM_DURATION_S; s += SIM_DT_S) {
-    const v = computeVitalsAtTime({ anesthesia, oxygen, blood_loss }, s, { extremeElapsedSeconds: s });
+    const eff = effectiveInputsAtTime({ anesthesia, oxygen, blood_loss }, s);
+    const v = computeVitalsAtTime(eff, s, { extremeElapsedSeconds: s });
     t.push(s);
     hr.push(v.hr);
     map.push(v.map);
@@ -919,7 +1056,7 @@ function initThree() {
       // Fallback: show a simple parametric heart if GLB load fails.
       const fallbackGeometry = makeHeartGeometry();
       const fallbackMaterial = new THREE.MeshStandardMaterial({
-        color: new THREE.Color("red"),
+        color: new THREE.Color("#7a2c1a"),
         roughness: 0.35,
         metalness: 0.05,
       });
@@ -928,7 +1065,7 @@ function initThree() {
       fallback.rotation.y = Math.PI * 0.18;
       heartGroup.add(fallback);
       heartMaterials = [fallbackMaterial];
-      applyHeartColor(new THREE.Color("red"));
+      applyHeartColor(new THREE.Color("#7a2c1a"));
 
       // HeartbeatPulse call site: attach to fallback mesh.
       heartbeatPulse?.attach(fallback, clock.getElapsedTime());
@@ -966,6 +1103,12 @@ function initThree() {
   renderer.setAnimationLoop(() => {
     const t = clock.getElapsedTime();
     controls.update();
+
+    // Always-on death monitor (independent of live graph loop).
+    updateDeathMonitor(t);
+
+    // If the patient is dead, force the heartbeat pulse off even if the live sim is stopped.
+    if (patientDeadLatched) heartbeatPulse?.setBpm(0);
 
     // Live charts update (ECG monitor-like sweep)
     try {
@@ -1042,8 +1185,8 @@ async function loadGlbInto(targetGroup, camera) {
 
   targetGroup.add(root);
 
-  // Ensure initial color matches requested default (red).
-  applyHeartColor(new THREE.Color("#ff2d2d"));
+  // Ensure initial color matches requested default (reddish-brown).
+  applyHeartColor(heartColorFromInputs({ oxygen: 100, blood_loss: 0 }));
 
   // Frame camera a bit nicer around the model.
   camera.position.set(0.2, 0.3, 7);
