@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Surgical Risk Digital Twin</title>
+    <link rel="stylesheet" href="style.css" />
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div class="layout">
+      <div class="panel">
+        <h1>Heart Digital Twin (Prototype)</h1>
+        <p class="sub">
+          Use the simplified inputs (anesthesia, oxygen cylinder supply, blood loss) and press Simulate to drive a basic risk score and heart color.
+        </p>
+
+        <div class="controls">
+          <button id="btn-load-example" type="button">Reset</button>
+          <button id="btn-predict" type="button">Simulate</button>
+        </div>
+
+        <div id="form" class="form"></div>
+
+        <div class="results">
+          <div class="row">
+            <div class="label">Risk score</div>
+            <div id="driving" class="value">—</div>
+          </div>
+          <div class="row">
+            <div class="label">Derived vitals</div>
+            <div id="p" class="value">—</div>
+          </div>
+
+          <h2>Graphs</h2>
+          <div class="charts">
+            <div class="chart">
+              <div class="chartTitle">Heart Rate (bpm)</div>
+              <canvas id="chart-hr" class="chartCanvas" width="360" height="120"></canvas>
+            </div>
+            <div class="chart">
+              <div class="chartTitle">Blood Pressure (MAP, mmHg)</div>
+              <canvas id="chart-bp" class="chartCanvas" width="360" height="120"></canvas>
+            </div>
+            <div class="chart">
+              <div class="chartTitle">Cardiac Output (L/min)</div>
+              <canvas id="chart-co" class="chartCanvas" width="360" height="120"></canvas>
+            </div>
+          </div>
+
+          <h2>Details</h2>
+          <pre id="all" class="mono">—</pre>
+        </div>
+
+        <div id="status" class="status">Ready</div>
+      </div>
+
+      <div class="viewer">
+        <canvas id="c"></canvas>
+      </div>
+    </div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

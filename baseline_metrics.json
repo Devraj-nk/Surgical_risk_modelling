@@ -1,0 +1,163 @@
+{
+  "dataset": {
+    "path": "D:\\Projects\\surgical_risk_modelling\\risk_labeled_dataset_30s.csv",
+    "n_rows_raw": 100081,
+    "n_rows_used": 20019,
+    "downsample_step": 5,
+    "n_episodes": 6,
+    "feature_cols": [
+      "HeartRate(1/min)",
+      "MeanArterialPressure(mmHg)",
+      "OxygenSaturation",
+      "RespirationRate(1/min)",
+      "CardiacOutput(L/min)",
+      "EndTidalCarbonDioxideFraction",
+      "TidalVolume(mL)",
+      "SystolicArterialPressure(mmHg)",
+      "DiastolicArterialPressure(mmHg)",
+      "CentralVenousPressure(mmHg)",
+      "CarbonDioxideSaturation",
+      "TotalAlveolarVentilation(L/min)",
+      "OxygenConsumptionRate(mL/min)",
+      "CarbonDioxideProductionRate(mL/min)"
+    ],
+    "target_cols": [
+      "hypoxia_next_30s",
+      "apnea_next_30s",
+      "hypoventilation_next_30s",
+      "low_tidal_volume_next_30s",
+      "hypercapnia_next_30s",
+      "high_etco2_next_30s",
+      "respiratory_compromise_next_30s"
+    ]
+  },
+  "evaluation": {
+    "scheme": "WithinEpisodeTimeSplitWithPurge",
+    "group_col": "episode_id",
+    "time_col": "Time(s)",
+    "train_fraction": 0.7,
+    "horizon_s": 30.0,
+    "n_train": 12212,
+    "n_test": 6007,
+    "split_info": [
+      {
+        "episode_id": 0,
+        "t_max_s": 456.42,
+        "split_t_s": 319.49399999999997,
+        "train_end_t_s": 289.49399999999997,
+        "n_train": 2895,
+        "n_test": 1370
+      },
+      {
+        "episode_id": 1,
+        "t_max_s": 243.22,
+        "split_t_s": 170.254,
+        "train_end_t_s": 140.254,
+        "n_train": 1403,
+        "n_test": 730
+      },
+      {
+        "episode_id": 2,
+        "t_max_s": 198.32,
+        "split_t_s": 138.82399999999998,
+        "train_end_t_s": 108.82399999999998,
+        "n_train": 1089,
+        "n_test": 595
+      },
+      {
+        "episode_id": 3,
+        "t_max_s": 228.82,
+        "split_t_s": 160.17399999999998,
+        "train_end_t_s": 130.17399999999998,
+        "n_train": 1302,
+        "n_test": 687
+      },
+      {
+        "episode_id": 4,
+        "t_max_s": 540.12,
+        "split_t_s": 378.084,
+        "train_end_t_s": 348.084,
+        "n_train": 3481,
+        "n_test": 1621
+      },
+      {
+        "episode_id": 5,
+        "t_max_s": 334.52,
+        "split_t_s": 234.16399999999996,
+        "train_end_t_s": 204.16399999999996,
+        "n_train": 2042,
+        "n_test": 1004
+      }
+    ],
+    "per_target": {
+      "hypoxia_next_30s": {
+        "pos_rate_train": 0.0,
+        "pos_rate_test": 0.10820709172631929,
+        "roc_auc": 0.5,
+        "avg_precision": 0.10820709172631929,
+        "precision@0.5": 0.0,
+        "recall@0.5": 0.0,
+        "f1@0.5": 0.0
+      },
+      "apnea_next_30s": {
+        "pos_rate_train": 0.06370782836554209,
+        "pos_rate_test": 0.0,
+        "roc_auc": null,
+        "avg_precision": null,
+        "precision@0.5": 0.0,
+        "recall@0.5": 0.0,
+        "f1@0.5": 0.0
+      },
+      "hypoventilation_next_30s": {
+        "pos_rate_train": 0.03791352767769407,
+        "pos_rate_test": 0.12002663559180955,
+        "roc_auc": 0.9079543325655973,
+        "avg_precision": 0.38159887464236963,
+        "precision@0.5": 0.41204819277108434,
+        "recall@0.5": 0.47434119278779474,
+        "f1@0.5": 0.4410058027079304
+      },
+      "low_tidal_volume_next_30s": {
+        "pos_rate_train": 0.03791352767769407,
+        "pos_rate_test": 0.12768436823705676,
+        "roc_auc": 0.9000082108343203,
+        "avg_precision": 0.38298562739811637,
+        "precision@0.5": 0.41204819277108434,
+        "recall@0.5": 0.44589308996088656,
+        "f1@0.5": 0.4283030682529743
+      },
+      "hypercapnia_next_30s": {
+        "pos_rate_train": 0.3535866360956436,
+        "pos_rate_test": 0.17130014982520392,
+        "roc_auc": 0.9151621849451484,
+        "avg_precision": 0.5660816246691837,
+        "precision@0.5": 0.5301783264746228,
+        "recall@0.5": 0.7512147716229349,
+        "f1@0.5": 0.621632488942501
+      },
+      "high_etco2_next_30s": {
+        "pos_rate_train": 0.35587946282345234,
+        "pos_rate_test": 0.018644914266688864,
+        "roc_auc": 1.0,
+        "avg_precision": 1.0,
+        "precision@0.5": 0.7368421052631579,
+        "recall@0.5": 1.0,
+        "f1@0.5": 0.8484848484848485
+      },
+      "respiratory_compromise_next_30s": {
+        "pos_rate_train": 0.44300687848018344,
+        "pos_rate_test": 0.17130014982520392,
+        "roc_auc": 0.9106679691907755,
+        "avg_precision": 0.538081156952645,
+        "precision@0.5": 0.5753811405985318,
+        "recall@0.5": 0.9902818270165209,
+        "f1@0.5": 0.7278571428571429
+      }
+    }
+  },
+  "model": {
+    "type": "Pipeline(StandardScaler -> OneVsRest(LogisticRegression))",
+    "threshold": 0.5,
+    "artifact": "D:\\Projects\\surgical_risk_modelling\\baseline_logreg_ovr.joblib"
+  }
+}

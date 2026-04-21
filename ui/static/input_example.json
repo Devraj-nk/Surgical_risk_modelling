@@ -1,0 +1,16 @@
+{
+  "HeartRate(1/min)": 78,
+  "MeanArterialPressure(mmHg)": 85,
+  "OxygenSaturation": 0.97,
+  "RespirationRate(1/min)": 12,
+  "CardiacOutput(L/min)": 5.2,
+  "EndTidalCarbonDioxideFraction": 0.045,
+  "TidalVolume(mL)": 500,
+  "SystolicArterialPressure(mmHg)": 120,
+  "DiastolicArterialPressure(mmHg)": 75,
+  "CentralVenousPressure(mmHg)": 6,
+  "CarbonDioxideSaturation": 0.06,
+  "TotalAlveolarVentilation(L/min)": 4.5,
+  "OxygenConsumptionRate(mL/min)": 250,
+  "CarbonDioxideProductionRate(mL/min)": 200
+}
