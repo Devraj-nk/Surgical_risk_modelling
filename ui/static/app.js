@@ -82,7 +82,7 @@ class HeartbeatPulse {
   setBpm(bpm) {
     const v = Number(bpm);
     if (!Number.isFinite(v)) return;
-    this.bpm = clamp(v, 30, 180);
+    this.bpm = clamp(v, 0, 180);
   }
 
   update(nowSeconds) {
@@ -91,7 +91,11 @@ class HeartbeatPulse {
     const t = Number(nowSeconds);
     if (!Number.isFinite(t)) return;
 
-    const bpm = clamp(this.bpm, 30, 180);
+    const bpm = clamp(this.bpm, 0, 180);
+    if (bpm < 1) {
+      this.object.scale.copy(this.baseScale);
+      return;
+    }
     const omega = (2 * Math.PI * bpm) / 60;
     const phase = omega * (t - (this.startTime ?? 0));
 
@@ -182,7 +186,7 @@ function logistic01(x) {
   return 1 / (1 + Math.exp(-v));
 }
 
-function computeVitalsAtTime({ anesthesia, oxygen, blood_loss }, tSeconds) {
+function computeVitalsAtTime({ anesthesia, oxygen, blood_loss }, tSeconds, options = {}) {
   const t = Math.max(0, Number(tSeconds) || 0);
 
   const a = clamp((anesthesia ?? 0) / 100, 0, 1);
@@ -194,6 +198,11 @@ function computeVitalsAtTime({ anesthesia, oxygen, blood_loss }, tSeconds) {
 
   const anesthesiaMax = clamp((a - 0.8) / 0.2, 0, 1); // 0 below 80%, 1 at 100%
   const compAllowed = 1 - anesthesiaMax; // max anesthesia suppresses compensation
+
+  const extremeA = o <= 0.01; // zero oxygen
+  const extremeB = bloodMl >= 2800; // extreme blood loss
+  const extremeC = a >= 0.8; // max anesthesia (80–100%)
+  const extreme = extremeA || extremeB || extremeC;
 
   // Baseline steady-state targets (non-extreme).
   // Blood-loss compensation is explicitly damped by anesthesia.
@@ -227,7 +236,7 @@ function computeVitalsAtTime({ anesthesia, oxygen, blood_loss }, tSeconds) {
   co = clamp(co - 0.6 * hypoxia, 0.8, 10);
 
   // A) Zero oxygen: delayed collapse (do not drop instantly).
-  const isZeroOxygen = o <= 0.01;
+  const isZeroOxygen = extremeA;
   if (isZeroOxygen) {
     const collapseStart = 20;
     const collapseDuration = lerp(150, 85, anesthesiaMax); // max anesthesia -> faster collapse
@@ -249,7 +258,7 @@ function computeVitalsAtTime({ anesthesia, oxygen, blood_loss }, tSeconds) {
   }
 
   // B) Extreme blood loss: compensation breaks then sudden decompensation.
-  const isExtremeBleed = bloodMl >= 2800;
+  const isExtremeBleed = extremeB;
   if (isExtremeBleed) {
     const compRamp = clamp(t / 20, 0, 1);
     const hrHigh = lerp(hr, 145, compRamp) * (0.25 + 0.75 * compAllowed);
@@ -295,7 +304,20 @@ function computeVitalsAtTime({ anesthesia, oxygen, blood_loss }, tSeconds) {
   const riskFromMap = clamp((65 - map) / 45, 0, 1);
   const risk = clamp(Math.max(riskFromSpo2, riskFromMap) + 0.15 * a, 0, 1);
 
-  return { hr, map, co, spo2, risk };
+  // Death / flatline for the extreme inputs only.
+  // Requirement: after ~20–30s, heart stops and graphs go to nil.
+  const deathAfterS = 25;
+  const extremeElapsedSeconds =
+    options && Number.isFinite(options.extremeElapsedSeconds) ? Math.max(0, options.extremeElapsedSeconds) : null;
+  const dead = extreme && (extremeElapsedSeconds != null ? extremeElapsedSeconds >= deathAfterS : t >= deathAfterS);
+  if (dead) {
+    hr = 0;
+    map = 0;
+    co = 0;
+    spo2 = 0;
+  }
+
+  return { hr, map, co, spo2, risk: dead ? 1 : risk, dead };
 }
 
 function buildForm() {
@@ -316,6 +338,14 @@ function getInputs() {
     out[cfg.key] = v;
   }
   return out;
+}
+
+function tryGetInputs() {
+  try {
+    return getInputs();
+  } catch {
+    return null;
+  }
 }
 
 function resetInputs() {
@@ -341,14 +371,18 @@ function startLiveSimulation(inputs) {
     startedAt: null,
     lastSampleAt: 0,
     sampleDt: 0.2,
-    windowSeconds: 20,
+    windowSeconds: 10,
     maxSeconds: SIM_DURATION_S,
+    cycleIndex: null,
+    extremeSince: null,
+    deadLatched: false,
     t: [],
     hr: [],
     map: [],
     co: [],
     spo2: [],
     risk: [],
+    dead: false,
   };
 
   setStatus("Running (live)...");
@@ -367,6 +401,7 @@ function pushSample(buf, t, v, maxPoints) {
   buf.co.push(v.co);
   buf.spo2.push(v.spo2);
   buf.risk.push(v.risk);
+  buf.dead = Boolean(v.dead);
 
   if (buf.t.length > maxPoints) {
     const drop = buf.t.length - maxPoints;
@@ -390,13 +425,49 @@ function updateLiveSimulation(nowSeconds) {
 
   const tSim = Math.max(0, nowSeconds - sim.startedAt);
 
+  // Update inputs live while running.
+  const latest = tryGetInputs();
+  if (latest) sim.inputs = latest;
+
+  // Determine if we're currently in an extreme condition.
+  const aNow = clamp((sim.inputs.anesthesia ?? 0) / 100, 0, 1);
+  const oNow = clamp((sim.inputs.oxygen ?? 100) / 100, 0, 1);
+  const bNowMl = clamp(Number(sim.inputs.blood_loss ?? 0), 0, 4000);
+  const extremeNow = oNow <= 0.01 || bNowMl >= 2800 || aNow >= 0.8;
+
+  // Death happens after ~25s of being in an extreme condition.
+  // Once dead, keep dead even if inputs later change.
+  if (sim.deadLatched) {
+    sim.extremeSince = sim.extremeSince ?? 0;
+  } else if (extremeNow) {
+    if (sim.extremeSince == null) sim.extremeSince = tSim;
+  } else {
+    sim.extremeSince = null;
+  }
+
+  // ECG-style sweep: clear buffers when we wrap.
+  const cycleIndex = Math.floor(tSim / sim.windowSeconds);
+  if (sim.cycleIndex == null) sim.cycleIndex = cycleIndex;
+  if (cycleIndex !== sim.cycleIndex) {
+    sim.cycleIndex = cycleIndex;
+    sim.t.length = 0;
+    sim.hr.length = 0;
+    sim.map.length = 0;
+    sim.co.length = 0;
+    sim.spo2.length = 0;
+    sim.risk.length = 0;
+  }
+
   // Sample at a steady cadence regardless of frame rate.
   const maxPoints = Math.ceil((sim.windowSeconds / sim.sampleDt) * 2);
   while (nowSeconds - sim.lastSampleAt >= sim.sampleDt) {
     const tS = Math.max(0, sim.lastSampleAt - sim.startedAt);
-    const v = computeVitalsAtTime(sim.inputs, tS);
+    const extremeElapsedSeconds = sim.extremeSince == null ? null : tS - sim.extremeSince;
+    const v = computeVitalsAtTime(sim.inputs, tS, { extremeElapsedSeconds });
     pushSample(sim, tS, v, maxPoints);
     sim.lastSampleAt += sim.sampleDt;
+
+    if (v.dead) sim.deadLatched = true;
   }
 
   const n = sim.t.length;
@@ -407,7 +478,7 @@ function updateLiveSimulation(nowSeconds) {
     const spo2 = sim.spo2[n - 1];
     const risk = sim.risk[n - 1];
 
-    heartbeatPulse?.setBpm(hr);
+    heartbeatPulse?.setBpm(sim.dead || sim.deadLatched ? 0 : hr);
     els.driving.textContent = risk.toFixed(3);
     els.p.textContent = `HR ${hr.toFixed(0)} bpm, MAP ${map.toFixed(0)} mmHg, CO ${co.toFixed(2)} L/min`;
     els.all.textContent = JSON.stringify(
@@ -425,20 +496,39 @@ function updateLiveSimulation(nowSeconds) {
           spo2_percent: spo2 * 100,
         },
         risk_score_0to1: risk,
-        notes: "Heuristic prototype (live).",
+        notes: sim.dead ? "Heuristic prototype (live): patient dead." : "Heuristic prototype (live).",
       },
       null,
       2
     );
+
+    if (sim.dead || sim.deadLatched) setStatus("Patient dead");
   }
 
-  // Render scrolling window
-  const xMax = tSim;
-  const xMin = Math.max(0, xMax - sim.windowSeconds);
-
-  drawScrollingChart(els.chartHr, sim.t, sim.hr, { xMin, xMax, units: "bpm", line: "#ff7a7a" });
-  drawScrollingChart(els.chartBp, sim.t, sim.map, { xMin, xMax, units: "mmHg", line: "#ff7a7a" });
-  drawScrollingChart(els.chartCo, sim.t, sim.co, { xMin, xMax, units: "L/min", line: "#ff7a7a" });
+  // Render ECG-like sweep: show only current cycle segment up to the cursor.
+  const cycleStart = sim.cycleIndex * sim.windowSeconds;
+  const cursorX = tSim - cycleStart;
+  drawSweepChart(els.chartHr, sim.t, sim.hr, {
+    cycleStart,
+    cursorX,
+    windowSeconds: sim.windowSeconds,
+    units: "bpm",
+    line: "#ff7a7a",
+  });
+  drawSweepChart(els.chartBp, sim.t, sim.map, {
+    cycleStart,
+    cursorX,
+    windowSeconds: sim.windowSeconds,
+    units: "mmHg",
+    line: "#ff7a7a",
+  });
+  drawSweepChart(els.chartCo, sim.t, sim.co, {
+    cycleStart,
+    cursorX,
+    windowSeconds: sim.windowSeconds,
+    units: "L/min",
+    line: "#ff7a7a",
+  });
 
   if (tSim >= sim.maxSeconds) {
     setStatus("Done");
@@ -537,7 +627,7 @@ function simulateSeries({ anesthesia, oxygen, blood_loss }) {
   const risk = [];
 
   for (let s = 0; s <= SIM_DURATION_S; s += SIM_DT_S) {
-    const v = computeVitalsAtTime({ anesthesia, oxygen, blood_loss }, s);
+    const v = computeVitalsAtTime({ anesthesia, oxygen, blood_loss }, s, { extremeElapsedSeconds: s });
     t.push(s);
     hr.push(v.hr);
     map.push(v.map);
@@ -687,6 +777,97 @@ function drawScrollingChart(canvas, xs, ys, { xMin, xMax, units, line }) {
   for (let i = 0; i < xs.length; i++) {
     const x = xs[i];
     if (x < x0 || x > x1) continue;
+    const y = ys[i];
+    if (!Number.isFinite(y)) continue;
+    const xx = xTo(x);
+    const yy = yTo(y);
+    if (!started) {
+      ctx.moveTo(xx, yy);
+      started = true;
+    } else {
+      ctx.lineTo(xx, yy);
+    }
+  }
+  if (started) ctx.stroke();
+}
+
+function drawSweepChart(canvas, xsAbs, ys, { cycleStart, cursorX, windowSeconds, units, line }) {
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "rgba(0,0,0,0.20)";
+  ctx.fillRect(0, 0, w, h);
+
+  const padL = 34;
+  const padR = 10;
+  const padT = 10;
+  const padB = 18;
+
+  const x0 = 0;
+  const x1 = Math.max(1e-6, windowSeconds);
+  const xNow = clamp(cursorX, 0, x1);
+
+  // Y range from visible portion only (0..cursor)
+  let yMin = Infinity;
+  let yMax = -Infinity;
+  for (let i = 0; i < xsAbs.length; i++) {
+    const x = xsAbs[i] - cycleStart;
+    if (x < x0 || x > xNow) continue;
+    const y = ys[i];
+    if (!Number.isFinite(y)) continue;
+    yMin = Math.min(yMin, y);
+    yMax = Math.max(yMax, y);
+  }
+  if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) {
+    yMin = 0;
+    yMax = 1;
+  }
+  if (Math.abs(yMax - yMin) < 1e-6) yMax = yMin + 1;
+  const yPad = (yMax - yMin) * 0.12;
+  yMin -= yPad;
+  yMax += yPad;
+
+  const xTo = (x) => padL + ((x - x0) / (x1 - x0)) * (w - padL - padR);
+  const yTo = (y) => padT + (1 - (y - yMin) / (yMax - yMin)) * (h - padT - padB);
+
+  // Grid
+  ctx.strokeStyle = "rgba(255,255,255,0.10)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i <= 4; i++) {
+    const yy = padT + (i / 4) * (h - padT - padB);
+    ctx.moveTo(padL, yy);
+    ctx.lineTo(w - padR, yy);
+  }
+  ctx.stroke();
+
+  // Labels
+  ctx.fillStyle = "rgba(231,238,247,0.65)";
+  ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+  ctx.fillText(`${yMax.toFixed(0)} ${units}`, 6, padT + 10);
+  ctx.fillText(`${yMin.toFixed(0)} ${units}`, 6, h - padB);
+  ctx.fillText(`0s`, padL, h - 6);
+  ctx.fillText(`${x1.toFixed(0)}s`, w - padR - 32, h - 6);
+
+  // Cursor line (sweep)
+  ctx.strokeStyle = "rgba(110,220,255,0.35)";
+  ctx.beginPath();
+  const cx = xTo(xNow);
+  ctx.moveTo(cx, padT);
+  ctx.lineTo(cx, h - padB);
+  ctx.stroke();
+
+  // Trace only up to cursorX (no old data)
+  ctx.strokeStyle = line || "#ff7a7a";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  let started = false;
+  for (let i = 0; i < xsAbs.length; i++) {
+    const x = xsAbs[i] - cycleStart;
+    if (x < x0 || x > xNow) continue;
     const y = ys[i];
     if (!Number.isFinite(y)) continue;
     const xx = xTo(x);
