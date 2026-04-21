@@ -6,8 +6,6 @@ This project combines:
 - A **baseline ML model** that predicts short-horizon respiratory risk events from a single physiological snapshot
 - A lightweight **3D “digital twin” UI** (Three.js + GLB) with realtime monitor-style graphs
 
-> Note: The UI includes a simple interactive physiology **simulator** for high-level controls. The ML model is also included and can be invoked via CLI and via an HTTP `/predict` endpoint.
-
 ---
 
 ## Repo contents
@@ -28,9 +26,9 @@ This project combines:
 - `predict_risk.py`
   - CLI for predicting risk probabilities from a single physiological snapshot.
 - `ui/server.py`
-  - Minimal Python server that hosts the UI and exposes `/predict`.
+  - Minimal Python server that hosts the UI.
 - `ui/static/`
-  - Frontend (HTML/CSS/JS) + one or more `.glb` heart assets.
+  - Frontend (HTML/CSS/JS) + `.glb` heart assets.
 
 ---
 
@@ -39,8 +37,6 @@ This project combines:
 - Python 3.9+ (recommended: 3.10+)
 - pip
 
-Optional:
-- Jupyter (for the notebook)
 
 ---
 
@@ -50,20 +46,8 @@ Optional:
 git clone <your-repo-url>
 cd surgical_risk_modelling
 
-python -m venv .venv
-# Windows PowerShell:
-.\.venv\Scripts\Activate.ps1
-
 python -m pip install --upgrade pip
 python -m pip install numpy pandas scikit-learn joblib
-```
-
-If you want to run the notebook:
-
-```bash
-python -m pip install jupyter
-```
-
 ---
 
 ## Run the 3D UI
@@ -178,24 +162,6 @@ python predict_risk.py --print-schema
 ```
 
 ---
-
-## HTTP prediction endpoint (optional)
-
-When the UI server is running, you can POST to:
-
-- `POST /predict`
-
-Payload formats:
-
-```json
-{ "features": { "HeartRate(1/min)": 80, "MeanArterialPressure(mmHg)": 85 /* ... */ } }
-```
-
-or:
-
-```json
-{ "HeartRate(1/min)": 80, "MeanArterialPressure(mmHg)": 85 /* ... */ }
-```
 
 The response contains:
 
